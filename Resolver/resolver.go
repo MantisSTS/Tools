@@ -9,6 +9,10 @@ import (
 	"sync"
 )
 
+var wg sync.WaitGroup
+var threads int
+var goFaster bool
+
 func doLookup(domain string, results chan<- map[string]net.IP) {
 	addr, err := net.LookupIP(domain)
 	if err == nil {
@@ -22,17 +26,21 @@ func doLookup(domain string, results chan<- map[string]net.IP) {
 
 func processJob(jobs <-chan string, results chan<- map[string]net.IP) {
 	for data := range jobs {
-		doLookup(data, results)
+		if goFaster {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				doLookup(data, results)
+			}()
+		} else {
+			doLookup(data, results)
+		}
 	}
 }
 
 func main() {
-
-	var wg sync.WaitGroup
-
-	var threads int
-
 	flag.IntVar(&threads, "t", 30, "Number of concurrent jobs")
+	flag.BoolVar(&goFaster, "f", false, "I love the chaos")
 	flag.Parse()
 
 	results := make(chan map[string]net.IP, 2000)
@@ -56,6 +64,7 @@ func main() {
 		for sc.Scan() {
 			jobs <- sc.Text()
 		}
+		close(jobs)
 	}()
 
 	for res := range results {
@@ -64,4 +73,5 @@ func main() {
 		}
 	}
 	wg.Wait()
+	close(results)
 }
