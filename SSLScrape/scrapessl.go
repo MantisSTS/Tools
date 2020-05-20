@@ -112,7 +112,7 @@ func main() {
 	// Make jobs
 	for j := 0; j < threads; j++ {
 		wg.Add(1)
-		go func(jobs <-chan string, results chan<- map[string]string) {
+		go func(jobs <-chan string, results chan<- string) {
 			defer wg.Done()
 			processJob(jobs, results)
 		}(jobs, results)
