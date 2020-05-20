@@ -49,7 +49,7 @@ func parseIPs(ips string) ([]string, error) {
 	return ret, err
 }
 
-func doRequest(ip string, results chan<- map[string]string) {
+func doRequest(ip string, results chan<- string) {
 	res, err := parseIPs(ip)
 	if err != nil {
 		log.Println(err)
@@ -75,13 +75,17 @@ func doRequest(ip string, results chan<- map[string]string) {
 			fmt.Println(dest)
 			if err == nil {
 				resp, _ := client.Get(dest.String())
-				fmt.Println(resp.TLS)
+				for _, e := range resp.TLS.PeerCertificates {
+					for _, dns := range (*e).DNSNames {
+						results <- dns
+					}
+				}
 			}
 		}
 	}
 }
 
-func processJob(jobs <-chan string, results chan<- map[string]string) {
+func processJob(jobs <-chan string, results chan<- string) {
 	for data := range jobs {
 		doRequest(data, results)
 	}
@@ -89,7 +93,7 @@ func processJob(jobs <-chan string, results chan<- map[string]string) {
 
 func main() {
 	jobs := make(chan string, 1000)
-	results := make(chan map[string]string)
+	results := make(chan string)
 
 	var threads int
 	flag.IntVar(&threads, "t", 100, "Number of concurrent jobs")
