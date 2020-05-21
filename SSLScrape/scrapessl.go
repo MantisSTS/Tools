@@ -18,6 +18,7 @@ import (
 //	1. Specify ports to check on (443, 8443, etc)
 
 var wg sync.WaitGroup
+var jobs_wg sync.WaitGroup
 
 func inc(ip net.IP) {
 	for j := len(ip) - 1; j >= 0; j-- {
@@ -72,12 +73,13 @@ func doRequest(ip string, results chan<- string) {
 		for _, ipr := range res {
 			u := fmt.Sprintf("https://%s", string(ipr))
 			dest, err := url.Parse(u)
-			fmt.Println(dest)
 			if err == nil {
-				resp, _ := client.Get(dest.String())
-				for _, e := range resp.TLS.PeerCertificates {
-					for _, dns := range (*e).DNSNames {
-						results <- dns
+				resp, err := client.Get(dest.String())
+				if err == nil {
+					for _, e := range resp.TLS.PeerCertificates {
+						for _, dns := range (*e).DNSNames {
+							results <- dns
+						}
 					}
 				}
 			}
@@ -111,12 +113,17 @@ func main() {
 
 	// Make jobs
 	for j := 0; j < threads; j++ {
-		wg.Add(1)
+		jobs_wg.Add(1)
 		go func(jobs <-chan string, results chan<- string) {
 			defer wg.Done()
 			processJob(jobs, results)
 		}(jobs, results)
 	}
+
+	go func() {
+		jobs_wg.Wait()
+		close(results)
+	}()
 
 	wg.Add(1)
 	go func() {
