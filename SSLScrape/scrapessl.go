@@ -19,6 +19,8 @@ import (
 
 var wg sync.WaitGroup
 var jobs_wg sync.WaitGroup
+var verbose bool
+var threads int
 
 func inc(ip net.IP) {
 	for j := len(ip) - 1; j >= 0; j-- {
@@ -74,6 +76,9 @@ func doRequest(ip string, results chan<- string) {
 			u := fmt.Sprintf("https://%s", string(ipr))
 			dest, err := url.Parse(u)
 			if err == nil {
+				if verbose == true {
+					log.Println(dest)
+				}
 				resp, err := client.Get(dest.String())
 				if err == nil {
 					for _, e := range resp.TLS.PeerCertificates {
@@ -97,8 +102,8 @@ func main() {
 	jobs := make(chan string, 1000)
 	results := make(chan string)
 
-	var threads int
 	flag.IntVar(&threads, "t", 100, "Number of concurrent jobs")
+	flag.IntVar(&verbose, "v", false, "Set verbose mode on")
 	flag.Parse()
 
 	sc := bufio.NewScanner(os.Stdin)
