@@ -103,7 +103,7 @@ func main() {
 	results := make(chan string)
 
 	flag.IntVar(&threads, "t", 100, "Number of concurrent jobs")
-	flag.IntVar(&verbose, "v", false, "Set verbose mode on")
+	flag.BoolVar(&verbose, "v", false, "Set verbose mode on")
 	flag.Parse()
 
 	sc := bufio.NewScanner(os.Stdin)
