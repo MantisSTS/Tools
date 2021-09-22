@@ -10,8 +10,8 @@ import (
 )
 
 var wg sync.WaitGroup
+var rg sync.WaitGroup
 var threads int
-var goFaster bool
 
 func doLookup(domain string, results chan<- map[string]net.IP) {
 	addr, err := net.LookupIP(domain)
@@ -24,54 +24,48 @@ func doLookup(domain string, results chan<- map[string]net.IP) {
 	}
 }
 
-func processJob(jobs <-chan string, results chan<- map[string]net.IP) {
+func processJob(jobs <-chan string, results chan<- map[string]net.IP, wg *sync.WaitGroup) {
 	for data := range jobs {
-		if goFaster {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				doLookup(data, results)
-			}()
-		} else {
-			doLookup(data, results)
-		}
+		doLookup(data, results)
 	}
+	wg.Done()
 }
 
-func main() {
-	flag.IntVar(&threads, "t", 30, "Number of concurrent jobs")
-	flag.BoolVar(&goFaster, "f", false, "I love the chaos")
-	flag.Parse()
-
-	results := make(chan map[string]net.IP, 2000)
-	jobs := make(chan string, 2000)
-
-	sc := bufio.NewScanner(os.Stdin)
-
-	// Create jobs
-	for j := 0; j < threads; j++ {
-		wg.Add(1)
-		go func(jobs chan string, results chan map[string]net.IP) {
-			defer wg.Done()
-			processJob(jobs, results)
-		}(jobs, results)
-	}
-
-	// Read data into jobs channel
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for sc.Scan() {
-			jobs <- sc.Text()
-		}
-		close(jobs)
-	}()
-
+func readResults(results <-chan map[string]net.IP, rg *sync.WaitGroup) {
 	for res := range results {
 		for dom, ip := range res {
 			fmt.Printf("%s - %s\n", dom, ip)
 		}
 	}
+	rg.Done()
+}
+
+func main() {
+	flag.IntVar(&threads, "t", 30, "Number of concurrent jobs")
+	flag.Parse()
+
+	results := make(chan map[string]net.IP, 100)
+	jobs := make(chan string, 100)
+
+	sc := bufio.NewScanner(os.Stdin)
+	// Read data into jobs channel
+	for sc.Scan() {
+		jobs <- sc.Text()
+	}
+	close(jobs)
+
+	// Create jobs
+	for j := 0; j < threads; j++ {
+		wg.Add(1)
+		go processJob(jobs, results, &wg)
+	}
+
+	// Read Results
+	rg.Add(1)
+	go readResults(results, &rg)
+
 	wg.Wait()
 	close(results)
+	rg.Wait()
+
 }
