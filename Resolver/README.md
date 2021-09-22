@@ -13,6 +13,10 @@ There are lots of times when I want to resolve a whole list of domains to IP add
 
 `go build .`
 
+or
+
+`go get -u github.com/MantisSTS/Tools/Resolver`
+
 ## Usage
 
 Once built you can just run it like this:
