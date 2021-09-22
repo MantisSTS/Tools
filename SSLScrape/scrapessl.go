@@ -92,10 +92,18 @@ func doRequest(ip string, results chan<- string) {
 	}
 }
 
-func processJob(jobs <-chan string, results chan<- string) {
+func processJob(jobs <-chan string, results chan<- string, jobs_wg *sync.WaitGroup) {
 	for data := range jobs {
 		doRequest(data, results)
 	}
+	jobs_wg.Done()
+}
+
+func readResults(results <-chan string, wg *sync.WaitGroup) {
+	for res := range results {
+		fmt.Println(res)
+	}
+	wg.Done()
 }
 
 func main() {
@@ -107,6 +115,7 @@ func main() {
 	flag.Parse()
 
 	sc := bufio.NewScanner(os.Stdin)
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -119,24 +128,13 @@ func main() {
 	// Make jobs
 	for j := 0; j < threads; j++ {
 		jobs_wg.Add(1)
-		go func(jobs <-chan string, results chan<- string) {
-			defer wg.Done()
-			processJob(jobs, results)
-		}(jobs, results)
+		go processJob(jobs, results, &jobs_wg)
 	}
 
-	go func() {
-		jobs_wg.Wait()
-		close(results)
-	}()
-
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for res := range results {
-			fmt.Println(res)
-		}
-	}()
+	go readResults(results, &wg)
 
+	jobs_wg.Wait()
+	close(results)
 	wg.Wait()
 }

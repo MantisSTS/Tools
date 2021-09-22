@@ -35,6 +35,7 @@ func readResults(results <-chan map[string]net.IP, rg *sync.WaitGroup) {
 	for res := range results {
 		for dom, ip := range res {
 			fmt.Printf("%s - %s\n", dom, ip)
+			// delete(res, dom)
 		}
 	}
 	rg.Done()
