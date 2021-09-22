@@ -48,11 +48,15 @@ func main() {
 	jobs := make(chan string, 100)
 
 	sc := bufio.NewScanner(os.Stdin)
-	// Read data into jobs channel
-	for sc.Scan() {
-		jobs <- sc.Text()
-	}
-	close(jobs)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for sc.Scan() {
+			jobs <- sc.Text()
+		}
+		close(jobs)
+	}()
 
 	// Create jobs
 	for j := 0; j < threads; j++ {
