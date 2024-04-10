@@ -21,6 +21,9 @@ func doLookup(domain string, results chan<- map[string]net.IP) {
 			res[domain] = ip
 			results <- res
 		}
+	} else {
+		res['domain'] = nil
+		results <- res
 	}
 }
 
