@@ -6,7 +6,7 @@ This tool can be used to grab the SSL certificate's CommonNames from a range of 
 ## Install
 You can install this using `go get` or by running `go build .` 
 ```
-$ go get -u github.com/MantisSTS/Tools/SSLScrape
+$ go install -v github.com/MantisSTS/Tools/SSLScrape@latest
 ```
 or
 ```
