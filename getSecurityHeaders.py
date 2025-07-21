@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 import re
 from datetime import datetime
 import html
+import json
 
 
 class Colors:
@@ -741,17 +742,27 @@ def generate_html_output(response, args, is_secure, issues, header_value, displa
     )
 
 
-def make_request(url):
-    """Make HTTP request and return response"""
+def make_request(url, follow_redirects=False):
+    """Make HTTP request and return response with redirect information"""
     try:
         # Add schema if missing
+        original_url = url
         if not url.startswith(('http://', 'https://')):
             url = 'http://' + url
         
-        response = requests.get(url, timeout=10, allow_redirects=True)
+        # Store the original URL for reference
+        if follow_redirects:
+            # Capture all redirects
+            response = requests.get(url, timeout=10, allow_redirects=True)
+            # Get the redirect chain
+            redirect_history = response.history
+        else:
+            # Only get final response
+            response = requests.get(url, timeout=10, allow_redirects=True)
+            redirect_history = []
         
-        # Build the raw HTTP request for display purposes
-        parsed_url = urlparse(response.url)
+        # Build the raw HTTP request for the original URL
+        parsed_url = urlparse(url)  # Use original URL for request
         host = parsed_url.netloc
         path = parsed_url.path if parsed_url.path else '/'
         if parsed_url.query:
@@ -765,9 +776,14 @@ def make_request(url):
         raw_request += f"Connection: keep-alive\r\n"
         raw_request += f"\r\n"
         
-        # Add the raw request to the response object for later use
+        # Add additional information to the response object
         response.raw_request = raw_request
+        response.original_url = original_url
+        response.redirect_history = redirect_history
+        response.follow_redirects = follow_redirects
         
+        # Always return the response, even for HTTP error codes (403, 401, etc.)
+        # The security analysis should still be performed on error responses
         return response
     except requests.RequestException as e:
         print(f"Error making request to {url}: {e}")
@@ -802,6 +818,8 @@ Examples:
                        help='Save output to file: {URL}-{header_name}-{DATE}.txt')
     parser.add_argument('--output-html', action='store_true',
                        help='Save output as HTML file: {URL}-{header_name}-{DATE}.html')
+    parser.add_argument('--follow-redirects', action='store_true',
+                       help='Include all redirect responses in output (default: only final response)')
     
     args = parser.parse_args()
     
@@ -844,7 +862,7 @@ Examples:
 
 
 def process_batch(urls, headers, args):
-    """Process multiple URLs and headers, returning results grouped by header"""
+    """Process multiple URLs and headers, returning results grouped by header and issue type"""
     results = {}
     total_checks = len(urls) * len(headers)
     current_check = 0
@@ -852,7 +870,12 @@ def process_batch(urls, headers, args):
     print(f"Processing {len(urls)} URLs with {len(headers)} headers ({total_checks} total checks)...")
     
     for header in headers:
-        results[header] = []
+        # Initialize header results with missing and insecure categories
+        results[header] = {
+            'missing': [],
+            'insecure': [],
+            'secure': []
+        }
         
         for url in urls:
             current_check += 1
@@ -867,7 +890,7 @@ def process_batch(urls, headers, args):
             single_args.output_html = False  # Don't generate individual HTML files in batch mode
             
             # Reuse the existing single check logic
-            response = make_request(url)
+            response = make_request(url, getattr(args, 'follow_redirects', False))
             if not response:
                 continue
             
@@ -887,10 +910,10 @@ def process_batch(urls, headers, args):
                 
                 display_header = header
             
-            # Store result
+            # Store result - use original URL for consistency
             result = {
-                'url': response.url,
-                'original_url': url,
+                'url': response.url,  # Final URL after redirects
+                'original_url': response.original_url,  # Original URL from input
                 'status_code': response.status_code,
                 'header_name': header,
                 'header_value': header_value,
@@ -900,11 +923,23 @@ def process_batch(urls, headers, args):
                 'response': response
             }
             
-            results[header].append(result)
+            # Categorize result based on whether header is missing vs insecure
+            if is_secure:
+                results[header]['secure'].append(result)
+            elif header_value is None and header.lower() != 'info':
+                # Header is missing
+                results[header]['missing'].append(result)
+            else:
+                # Header is present but insecure, or info disclosure
+                results[header]['insecure'].append(result)
             
             # Print console output using simplified version
             print("=" * 60)
-            print(f"URL: {response.url}")
+            print(f"Original URL: {response.original_url}")
+            if response.url != response.original_url:
+                print(f"Final URL: {response.url}")
+                if hasattr(response, 'redirect_history') and response.redirect_history:
+                    print(f"Redirects: {len(response.redirect_history)}")
             print(f"Status: {response.status_code}")
             print(f"Header: {display_header}")
             
@@ -943,15 +978,87 @@ def generate_grouped_html_report(results, args):
         print(f"Error saving grouped HTML report: {e}")
 
 
+def generate_issue_type_section(results, category_type, section_title, css_class):
+    """Generate a section for a specific issue type (missing or insecure)"""
+    section_html = f'<div class="issue-type-group">'
+    section_html += f'<h1 class="issue-type-title {css_class}">{html.escape(section_title)}</h1>'
+    
+    has_results = False
+    
+    for header_name, categories in results.items():
+        category_results = categories.get(category_type, [])
+        if not category_results:
+            continue
+            
+        has_results = True
+        section_html += f'<div class="header-group">'
+        section_html += f'<h2 class="header-group-title">{html.escape(header_name)}</h2>'
+        
+        # Add "Copy All Evidence" button for this header/category
+        clean_header = re.sub(r'[^a-zA-Z0-9]', '', header_name)
+        section_html += f'<div style="padding: 15px; background-color: #f8f9fa; border-bottom: 1px solid #dee2e6;">'
+        section_html += f'<button class="copy-all-button" onclick="copyAllEvidence(\'{html.escape(header_name)}\', \'{category_type}\')">Copy All {html.escape(header_name)} Evidence</button>'
+        section_html += f'<span id="copy-all-success-{clean_header}-{category_type}" class="copy-success">✓ All evidence copied!</span>'
+        section_html += f'</div>'
+        
+        for i, result in enumerate(category_results):
+            section_html += f'<div class="url-result">'
+            
+            # URL info
+            section_html += f'<div class="url-info">'
+            section_html += f'<strong>Original URL:</strong> {html.escape(result["original_url"])}<br>'
+            if result["url"] != result["original_url"]:
+                section_html += f'<strong>Final URL:</strong> {html.escape(result["url"])}<br>'
+                if hasattr(result['response'], 'redirect_history') and result['response'].redirect_history:
+                    section_html += f'<strong>Redirects:</strong> {len(result["response"].redirect_history)}<br>'
+            section_html += f'<strong>Status Code:</strong> {result["status_code"]}<br>'
+            section_html += f'</div>'
+            
+            # Status section
+            if category_type == 'missing':
+                section_html += f'<div class="status-missing"><strong>⚠ MISSING HEADER:</strong> {html.escape(result["header_name"])}'
+            else:  # insecure
+                if result['header_name'].lower() == 'info':
+                    section_html += f'<div class="status-info"><strong>⚠ INFORMATION DISCLOSURE DETECTED</strong>'
+                else:
+                    section_html += f'<div class="status-insecure"><strong>⚠ INSECURE HEADER:</strong> {html.escape(result["header_name"])}'
+                    if result['header_value']:
+                        section_html += f'<br><strong>Value:</strong> <code>{html.escape(str(result["header_value"]))}</code>'
+            
+            if result['issues']:
+                section_html += '<div class="issues-list"><strong>Issues found:</strong><ul>'
+                for issue in result['issues']:
+                    section_html += f'<li>{html.escape(issue)}</li>'
+                section_html += '</ul></div>'
+            
+            section_html += '</div>'  # Close status div
+            
+            # Copy button for individual evidence
+            clean_header = re.sub(r'[^a-zA-Z0-9]', '', header_name)
+            section_html += f'<button class="copy-button" onclick="copyEvidence({i}, \'{html.escape(header_name)}\', \'{category_type}\')">Copy Evidence</button>'
+            section_html += f'<span id="copy-success-{i}-{clean_header}-{category_type}" class="copy-success">✓ Copied!</span>'
+            
+            section_html += f'</div>'  # Close url-result
+        
+        section_html += f'</div>'  # Close header-group
+    
+    if not has_results:
+        section_html += f'<div class="empty-category">No {section_title.lower()} found</div>'
+    
+    section_html += f'</div>'  # Close issue-type-group
+    
+    return section_html if has_results else ""
+
+
 def generate_grouped_html_content(results, timestamp):
-    """Generate the HTML content for grouped report"""
+    """Generate the HTML content for grouped report with missing/insecure categories"""
     
     html_template = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HTTP Header Security Report - Grouped by Header</title>
+    <title>HTTP Header Security Report - Categorized by Issue Type</title>
     <style>
         body {{
             font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
@@ -979,18 +1086,41 @@ def generate_grouped_html_content(results, timestamp):
             color: #333;
             font-size: 2.5em;
         }}
+        .issue-type-group {{
+            margin-bottom: 50px;
+            border: 3px solid #dee2e6;
+            border-radius: 8px;
+            overflow: hidden;
+        }}
+        .issue-type-title {{
+            background-color: #dc3545;
+            color: white;
+            padding: 20px;
+            margin: 0;
+            font-size: 2.0em;
+            font-weight: bold;
+            text-align: center;
+        }}
+        .issue-type-title.missing {{
+            background-color: #fd7e14;
+        }}
+        .issue-type-title.insecure {{
+            background-color: #dc3545;
+        }}
         .header-group {{
-            margin-bottom: 40px;
+            margin-bottom: 30px;
             border: 2px solid #dee2e6;
             border-radius: 8px;
             overflow: hidden;
+            margin-left: 20px;
+            margin-right: 20px;
         }}
         .header-group-title {{
             background-color: #007bff;
             color: white;
             padding: 15px 20px;
             margin: 0;
-            font-size: 1.8em;
+            font-size: 1.6em;
             font-weight: bold;
         }}
         .url-result {{
@@ -1007,20 +1137,20 @@ def generate_grouped_html_content(results, timestamp):
             margin-bottom: 20px;
             border-left: 4px solid #007bff;
         }}
-        .status-secure {{
-            background-color: #d4edda;
-            color: #155724;
-            padding: 15px;
-            border-radius: 5px;
-            border-left: 4px solid #28a745;
-            margin-bottom: 20px;
-        }}
-        .status-insecure {{
+        .status-missing {{
             background-color: #fff3cd;
             color: #856404;
             padding: 15px;
             border-radius: 5px;
-            border-left: 4px solid #ffc107;
+            border-left: 4px solid #fd7e14;
+            margin-bottom: 20px;
+        }}
+        .status-insecure {{
+            background-color: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 5px;
+            border-left: 4px solid #dc3545;
             margin-bottom: 20px;
         }}
         .status-info {{
@@ -1055,18 +1185,18 @@ def generate_grouped_html_content(results, timestamp):
             background-color: #218838;
         }}
         .copy-all-button {{
-            background-color: #dc3545;
+            background-color: #6f42c1;
             color: white;
             border: none;
             padding: 12px 20px;
             border-radius: 4px;
             cursor: pointer;
             font-size: 14px;
-            margin: 20px 0;
+            margin: 20px;
             font-weight: bold;
         }}
         .copy-all-button:hover {{
-            background-color: #c82333;
+            background-color: #5a32a3;
         }}
         .copy-success {{
             background-color: #17a2b8;
@@ -1091,10 +1221,16 @@ def generate_grouped_html_content(results, timestamp):
             border-top: 1px solid #dee2e6;
             padding-top: 20px;
         }}
+        .empty-category {{
+            padding: 20px;
+            text-align: center;
+            color: #6c757d;
+            font-style: italic;
+        }}
     </style>
     <script>
-        function copyEvidence(resultIndex, headerName) {{
-            const result = window.allResults[headerName][resultIndex];
+        function copyEvidence(resultIndex, headerName, categoryType) {{
+            const result = window.allResults[headerName][categoryType][resultIndex];
             
             // Build request HTML
             let requestHtml = '<p><strong>Request:</strong></p>\\n<figure class="table">\\n    <table>\\n        <tbody>\\n            <tr>\\n                <td>';
@@ -1132,11 +1268,7 @@ def generate_grouped_html_content(results, timestamp):
                 }}
                 
                 if (shouldHighlight) {{
-                    if (result.isSecure && headerName.toLowerCase() !== 'info') {{
-                        responseHtml += '\\n                    <p><mark class="marker-green">' + headerText + '</mark></p>';
-                    }} else {{
-                        responseHtml += '\\n                    <p><mark class="marker-yellow">' + headerText + '</mark></p>';
-                    }}
+                    responseHtml += '\\n                    <p><mark class="marker-yellow">' + headerText + '</mark></p>';
                 }} else {{
                     responseHtml += '\\n                    <p>' + headerText + '</p>';
                 }}
@@ -1148,7 +1280,7 @@ def generate_grouped_html_content(results, timestamp):
             
             // Copy to clipboard
             navigator.clipboard.writeText(fullHtml).then(() => {{
-                const successMsg = document.getElementById('copy-success-' + resultIndex + '-' + headerName.replace(/[^a-zA-Z0-9]/g, ''));
+                const successMsg = document.getElementById('copy-success-' + resultIndex + '-' + headerName.replace(/[^a-zA-Z0-9]/g, '') + '-' + categoryType);
                 successMsg.style.display = 'inline-block';
                 setTimeout(() => {{
                     successMsg.style.display = 'none';
@@ -1159,15 +1291,23 @@ def generate_grouped_html_content(results, timestamp):
             }});
         }}
         
-        function copyAllEvidence(headerName) {{
-            const results = window.allResults[headerName];
+        function copyAllEvidence(headerName, categoryType) {{
+            const results = window.allResults[headerName][categoryType];
             let allHtml = '';
+            
+            // Add affected hosts list
+            allHtml += '<p><strong>Affected Hosts:</strong></p>\\n<ul>\\n';
+            for (let i = 0; i < results.length; i++) {{
+                const result = results[i];
+                allHtml += '<li>' + result.originalUrl + '</li>\\n';
+            }}
+            allHtml += '</ul>\\n\\n';
             
             for (let i = 0; i < results.length; i++) {{
                 const result = results[i];
                 
-                // Add URL separator
-                allHtml += '<h3>' + result.url + '</h3>\\n';
+                // Add URL separator with strong tag
+                allHtml += '<p><strong>' + result.originalUrl + '</strong></p>\\n';
                 
                 // Build request HTML
                 let requestHtml = '<p><strong>Request:</strong></p>\\n<figure class="table">\\n    <table>\\n        <tbody>\\n            <tr>\\n                <td>';
@@ -1205,11 +1345,7 @@ def generate_grouped_html_content(results, timestamp):
                     }}
                     
                     if (shouldHighlight) {{
-                        if (result.isSecure && headerName.toLowerCase() !== 'info') {{
-                            responseHtml += '\\n                    <p><mark class="marker-green">' + headerText + '</mark></p>';
-                        }} else {{
-                            responseHtml += '\\n                    <p><mark class="marker-yellow">' + headerText + '</mark></p>';
-                        }}
+                        responseHtml += '\\n                    <p><mark class="marker-yellow">' + headerText + '</mark></p>';
                     }} else {{
                         responseHtml += '\\n                    <p>' + headerText + '</p>';
                     }}
@@ -1226,7 +1362,7 @@ def generate_grouped_html_content(results, timestamp):
             
             // Copy to clipboard
             navigator.clipboard.writeText(allHtml).then(() => {{
-                const successMsg = document.getElementById('copy-all-success-' + headerName.replace(/[^a-zA-Z0-9]/g, ''));
+                const successMsg = document.getElementById('copy-all-success-' + headerName.replace(/[^a-zA-Z0-9]/g, '') + '-' + categoryType);
                 successMsg.style.display = 'inline-block';
                 setTimeout(() => {{
                     successMsg.style.display = 'none';
@@ -1242,7 +1378,7 @@ def generate_grouped_html_content(results, timestamp):
     <div class="container">
         <div class="header">
             <h1>HTTP Header Security Report</h1>
-            <p>Grouped by Header Type</p>
+            <p>Categorized by Issue Type</p>
         </div>
         
         <div class="summary">
@@ -1253,7 +1389,7 @@ def generate_grouped_html_content(results, timestamp):
             <p><strong>Report generated:</strong> {timestamp}</p>
         </div>
         
-        {header_sections}
+        {content_sections}
         
         <div class="footer">
             Generated by HTTP Header Security Checker
@@ -1266,91 +1402,54 @@ def generate_grouped_html_content(results, timestamp):
 </body>
 </html>"""
 
-    # Generate header sections
-    header_sections = []
+    # Generate content sections organized by issue type
     all_urls = set()
     total_checks = 0
     
-    for header_name, header_results in results.items():
-        if not header_results:
-            continue
-            
-        section_html = f'<div class="header-group">'
-        section_html += f'<h2 class="header-group-title">{html.escape(header_name)}</h2>'
-        
-        # Add "Copy All Evidence" button for this header
-        clean_header = re.sub(r'[^a-zA-Z0-9]', '', header_name)
-        section_html += f'<div style="padding: 15px; background-color: #f8f9fa; border-bottom: 1px solid #dee2e6;">'
-        section_html += f'<button class="copy-all-button" onclick="copyAllEvidence(\'{html.escape(header_name)}\')">Copy All {html.escape(header_name)} Evidence</button>'
-        section_html += f'<span id="copy-all-success-{clean_header}" class="copy-success">✓ All evidence copied!</span>'
-        section_html += f'</div>'
-        
-        for i, result in enumerate(header_results):
-            all_urls.add(result['url'])
-            total_checks += 1
-            
-            section_html += f'<div class="url-result">'
-            
-            # URL info
-            section_html += f'<div class="url-info">'
-            section_html += f'<strong>URL:</strong> {html.escape(result["url"])}<br>'
-            section_html += f'<strong>Status Code:</strong> {result["status_code"]}<br>'
-            section_html += f'</div>'
-            
-            # Status section
-            if result['is_secure']:
-                if result['header_name'].lower() == 'info':
-                    section_html += f'<div class="status-secure"><strong>✓ SECURE:</strong> No information disclosure headers detected</div>'
-                else:
-                    section_html += f'<div class="status-secure"><strong>✓ SECURE:</strong> {html.escape(result["header_name"])} header is properly configured</div>'
-            else:
-                if result['header_name'].lower() == 'info':
-                    section_html += f'<div class="status-info"><strong>⚠ INFORMATION DISCLOSURE DETECTED</strong>'
-                else:
-                    section_html += f'<div class="status-insecure"><strong>⚠ SECURITY ISSUE DETECTED</strong>'
-                    if result['header_value'] is None:
-                        section_html += f'<br><strong>Header:</strong> {html.escape(result["header_name"])}<br><strong>Status:</strong> MISSING'
-                    else:
-                        section_html += f'<br><strong>Header:</strong> {html.escape(result["header_name"])}<br><strong>Value:</strong> <code>{html.escape(str(result["header_value"]))}</code>'
-                
-                if result['issues']:
-                    section_html += '<div class="issues-list"><strong>Issues found:</strong><ul>'
-                    for issue in result['issues']:
-                        section_html += f'<li>{html.escape(issue)}</li>'
-                    section_html += '</ul></div>'
-                
-                section_html += '</div>'
-            
-            # Copy button for individual evidence
-            clean_header = re.sub(r'[^a-zA-Z0-9]', '', header_name)
-            section_html += f'<button class="copy-button" onclick="copyEvidence({i}, \'{html.escape(header_name)}\')">Copy Evidence</button>'
-            section_html += f'<span id="copy-success-{i}-{clean_header}" class="copy-success">✓ Copied!</span>'
-            
-            section_html += f'</div>'  # Close url-result
-        
-        section_html += f'</div>'  # Close header-group
-        header_sections.append(section_html)
+    # Count totals
+    for header_name, categories in results.items():
+        for category_name, category_results in categories.items():
+            if category_results:
+                for result in category_results:
+                    all_urls.add(result['url'])
+                    total_checks += 1
+    
+    # Generate sections for Missing and Insecure headers
+    content_sections = []
+    
+    # Missing Headers Section
+    missing_section = generate_issue_type_section(results, 'missing', 'Missing Headers', 'missing')
+    if missing_section:
+        content_sections.append(missing_section)
+    
+    # Insecure Headers Section 
+    insecure_section = generate_issue_type_section(results, 'insecure', 'Insecure Headers', 'insecure')
+    if insecure_section:
+        content_sections.append(insecure_section)
     
     # Prepare JavaScript data
-    import json
     js_results = {}
-    for header_name, header_results in results.items():
-        js_results[header_name] = []
-        for result in header_results:
-            js_results[header_name].append({
-                'url': result['url'],
-                'statusCode': result['status_code'],
-                'isSecure': result['is_secure'],
-                'headers': dict(result['response'].headers),
-                'rawRequest': result['response'].raw_request
-            })
+    for header_name, categories in results.items():
+        js_results[header_name] = {}
+        for category_name, category_results in categories.items():
+            js_results[header_name][category_name] = []
+            for result in category_results:
+                js_results[header_name][category_name].append({
+                    'url': result['url'],
+                    'originalUrl': result['original_url'],
+                    'statusCode': result['status_code'],
+                    'isSecure': result['is_secure'],
+                    'headers': dict(result['response'].headers),
+                    'rawRequest': result['response'].raw_request,
+                    'redirectCount': len(result['response'].redirect_history) if hasattr(result['response'], 'redirect_history') else 0
+                })
     
     return html_template.format(
         total_urls=len(all_urls),
         total_headers=len(results),
         total_checks=total_checks,
         timestamp=timestamp,
-        header_sections=''.join(header_sections),
+        content_sections=''.join(content_sections),
         results_json=json.dumps(js_results)
     )
 
@@ -1359,7 +1458,7 @@ def process_single_check(url, header, args):
     """Process a single URL and header (existing functionality)"""
     
     # Make the request
-    response = make_request(url)
+    response = make_request(url, getattr(args, 'follow_redirects', False))
     if not response:
         sys.exit(1)
     
@@ -1384,7 +1483,11 @@ def process_single_check(url, header, args):
     output_lines = []
     output_lines.append("=" * 80)
     output_lines.append(f"HTTP Header Security Check")
-    output_lines.append(f"URL: {response.url}")
+    output_lines.append(f"Original URL: {response.original_url}")
+    if response.url != response.original_url:
+        output_lines.append(f"Final URL: {response.url}")
+        if hasattr(response, 'redirect_history') and response.redirect_history:
+            output_lines.append(f"Redirects: {len(response.redirect_history)}")
     output_lines.append(f"Status: {response.status_code}")
     output_lines.append(f"Checking Header: {display_header}")
     output_lines.append("=" * 80)
@@ -1418,6 +1521,18 @@ def process_single_check(url, header, args):
     output_lines.append(f"\nRaw HTTP Request:")
     output_lines.append("-" * 50)
     output_lines.append(response.raw_request.rstrip())
+    
+    # Add redirect information if --follow-redirects flag was used and redirects occurred
+    if getattr(args, 'follow_redirects', False) and hasattr(response, 'redirect_history') and response.redirect_history:
+        output_lines.append(f"\nRedirect Chain:")
+        output_lines.append("-" * 50)
+        for i, redirect_resp in enumerate(response.redirect_history, 1):
+            output_lines.append(f"Step {i}: {redirect_resp.status_code} {redirect_resp.url}")
+            # Show key headers from redirect responses
+            for name, value in redirect_resp.headers.items():
+                if name.lower() in ['location', 'set-cookie']:
+                    output_lines.append(f"  {name}: {value}")
+        output_lines.append(f"Final: {response.status_code} {response.url}")
     
     # Add all headers
     output_lines.append(f"\nResponse Headers:")
@@ -1483,11 +1598,4 @@ def process_single_check(url, header, args):
 
 
 if __name__ == "__main__":
-    import sys
-    import argparse
-    import requests
-    import re
-    import html
-    import json
-    
     main()
