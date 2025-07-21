@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+"""
+Used to extract evidence out of sslscan and testssl (at least that's what it was made for) output
+"""
+
 import sys
 import re
 
